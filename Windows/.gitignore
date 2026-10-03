@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.venv/
+config.json
+*.jsonl
+.uv-cache/
+.uv-python/
