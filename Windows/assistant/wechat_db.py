@@ -21,6 +21,10 @@ from .wechat import WeChatError
 STATE_DIR = Path(__file__).resolve().parent.parent / ".state" / "wechatdb"
 
 
+class ClipboardNotPlainText(WeChatError):
+    pass
+
+
 def resolve_contact(db, display_name: str) -> str:
     """Resolve the visible name to exactly one non-group username."""
     same_name = {
@@ -40,7 +44,7 @@ def resolve_contact(db, display_name: str) -> str:
     return matches.pop()
 
 
-def rows_to_messages(rows: list[dict]) -> tuple[Message, ...]:
+def rows_to_messages(rows: list[dict], self_username: str) -> tuple[Message, ...]:
     messages = []
     for row in reversed(rows):
         kind = "text" if row.get("type") == "文本" else "other"
@@ -50,7 +54,13 @@ def rows_to_messages(rows: list[dict]) -> tuple[Message, ...]:
             kind = "other"
             text = f"[{row.get('type') or '未知'}]"
         sender_id = int(row.get("sender_id") or 0)
-        sender = "outgoing" if sender_id == 2 else ("incoming" if sender_id > 0 else "system")
+        sender_username = row.get("sender_username") or ""
+        if sender_username == self_username:
+            sender = "outgoing"
+        elif sender_username and sender_id > 0:
+            sender = "incoming"
+        else:
+            sender = "system"
         identity = ":".join(str(row.get(k, "")) for k in ("sort_seq", "local_id", "create_time", "sender_id", "type"))
         messages.append(Message(sender, text, kind, identity))
     return tuple(messages)
@@ -69,7 +79,7 @@ def _read_clipboard_text() -> str | None:
         text_formats = {win32clipboard.CF_TEXT, win32clipboard.CF_OEMTEXT,
                         win32clipboard.CF_UNICODETEXT, win32clipboard.CF_LOCALE}
         if any(fmt not in text_formats for fmt in formats):
-            raise WeChatError("剪贴板含图片或富文本，请先清空或复制纯文字再发送")
+            raise ClipboardNotPlainText("剪贴板含图片或富文本")
         return (win32clipboard.GetClipboardData(win32clipboard.CF_UNICODETEXT)
                 if win32clipboard.CF_UNICODETEXT in formats else None)
     finally:
@@ -135,7 +145,7 @@ class WeChatDatabase:
             current = self._current_chat()
             draft = self._editor()[1] if current == self.contact else ""
             rows = self.db.get_messages(self.username, limit=self.limit)
-            return Snapshot(self.contact, rows_to_messages(rows), draft, current == self.contact)
+            return Snapshot(self.contact, rows_to_messages(rows, self.db.wxid), draft, current == self.contact)
         except WeChatError:
             raise
         except Exception as exc:
@@ -158,10 +168,19 @@ class WeChatDatabase:
         edit, draft = self._editor()
         if draft:
             raise WeChatError("微信输入框已有文字，未发送")
-        old_clipboard = _read_clipboard_text()
+        use_clipboard = True
         try:
-            # Paste without clearing so a concurrent human draft cannot be erased.
-            self.uia._paste_into(edit, reply, clear=False)
+            old_clipboard = _read_clipboard_text()
+        except ClipboardNotPlainText:
+            # ValuePattern can write without replacing a user's image clipboard.
+            use_clipboard = False
+            old_clipboard = None
+        try:
+            if use_clipboard:
+                # Paste without clearing so a concurrent human draft cannot be erased.
+                self.uia._paste_into(edit, reply, clear=False)
+            elif not self.uia._click_ctrl(edit) or not self.uia._set_text(edit, reply):
+                raise WeChatError("无法不改动剪贴板地填写微信输入框，未发送")
             filled = self.snapshot()
             if (filled.contact != expected.contact or not filled.is_direct
                     or filled.messages != expected.messages or filled.draft != reply
@@ -181,7 +200,8 @@ class WeChatDatabase:
         except Exception as exc:
             raise WeChatError("发送结果不确定；请人工检查微信，程序不会重发") from exc
         finally:
-            try:
-                _restore_clipboard(old_clipboard, reply)
-            except Exception:
-                pass
+            if use_clipboard:
+                try:
+                    _restore_clipboard(old_clipboard, reply)
+                except Exception:
+                    pass
