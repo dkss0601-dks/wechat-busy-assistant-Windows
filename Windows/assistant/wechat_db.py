@@ -30,6 +30,10 @@ def resolve_contact(db, display_name: str) -> str:
     }
     if any("@chatroom" in username for username in same_name):
         raise WeChatError("存在同名群聊，无法单凭标题安全区分；请给目标好友设置唯一备注名")
+    if display_name == "文件传输助手":
+        if same_name - {"filehelper"}:
+            raise WeChatError("存在与文件传输助手同名的联系人，无法安全测试")
+        return "filehelper"
     matches = {username for username in same_name if username != db.wxid}
     if len(matches) != 1:
         raise WeChatError(f"目标好友的准确显示名须唯一，当前匹配 {len(matches)} 位；请使用唯一备注名")

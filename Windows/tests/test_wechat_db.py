@@ -21,6 +21,13 @@ def row(seq, sender, text, kind="文本"):
 
 
 class DatabaseAdapterTests(unittest.TestCase):
+    def test_filehelper_is_allowed_only_without_name_collision(self):
+        db = FakeDB([])
+        self.assertEqual(resolve_contact(db, "文件传输助手"), "filehelper")
+        db.rows.append({"username": "wxid_other", "remark": "文件传输助手", "nick_name": "其他人"})
+        with self.assertRaises(WeChatError):
+            resolve_contact(db, "文件传输助手")
+
     def test_contact_must_resolve_to_one_person(self):
         db = FakeDB([
             {"username": "wxid_friend", "remark": "朋友", "nick_name": "原名"},
