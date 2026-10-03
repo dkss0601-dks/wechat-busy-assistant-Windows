@@ -1,83 +1,91 @@
 # 忙碌消息助手 · Windows
 
-Windows 版使用 Python、Tkinter、Windows UI Automation 与 DeepSeek API，在一段指定的忙碌时间内，为**一个明确选定且当前打开的个人微信私聊**生成 AI 回复。启动时先记住可见消息，已有消息不触发回复。新文字默认生成草稿，由用户确认；开启“生成后自动发送”后，只有微信窗口在前台、目标好友及消息未变、输入框为空时才尝试发送。
+Windows 端使用 Python、Tkinter、DeepSeek API 和本机微信 4.x 数据库。它针对**一个已打开的单人聊天**建立消息基线，只处理启动后的新文字消息。默认仅生成草稿，点击“5 秒后确认发送”并切回微信后才尝试发送。经过人工测试后，也可以主动勾选“生成后自动发送”；自动模式仍要求目标聊天保持打开、微信位于前台、输入框为空。
 
-本版的范围刻意保持明确：不遍历好友列表，不处理群聊、公众号、图片、表情、语音、视频或收款等内容。微信版本的无障碍控件结构可能不同，首次运行必须根据本机微信填写控件选择器。本项目尚未在真实好友对话中完成端到端验证，不保证任意微信版本开箱即用。
+这个版本不遍历好友，不处理群聊、公众号、图片、语音、视频或转账。媒体及系统消息会参与“聊天是否变化”的核对，但不会作为 AI 提示词。它尚未在真实好友对话中完成端到端发送验证，请先与同意测试的好友验证。
 
-## 文件结构
+## 实现方式与代码结构
 
 | 文件 | 作用 |
 | --- | --- |
-| `app.py` | Tkinter 界面、限时会话、草稿确认及自动发送流程 |
-| `assistant/core.py` | 可见消息衔接、启动基线、回复轮数与发送回执规则 |
-| `assistant/wechat.py` | pywinauto UIA 读取当前私聊及发送前后核对 |
-| `assistant/deepseek.py` | DeepSeek Chat Completions 请求和回复检查 |
-| `check_connection.py` | 用无聊天内容的测试文本检查 API Key 和模型 |
-| `diagnose.py` | 列出微信可访问控件的类型、自动化 ID 和类名；不打印聊天正文 |
-| `config.example.json` | 本机配置样例，不含密钥 |
-| `tests/` | 不连接微信、不调用 API 的规则测试 |
+| `app.py` | Tkinter 界面、限时会话、草稿确认和自动发送开关 |
+| `assistant/core.py` | 新消息识别、启动基线、轮数上限和发送回执规则 |
+| `assistant/wechat_db.py` | 从本机数据库读取指定好友的最近消息；通过微信 UIA 输入；回读数据库核对发送 |
+| `assistant/deepseek.py` | 使用环境变量中的 API Key 请求 DeepSeek |
+| `assistant/wechat.py` | 旧版微信可用的 UIA 适配器；作为可选后端保留 |
+| `check_connection.py` | 用虚构文本检查 DeepSeek 连接，不读取微信 |
+| `check_wechat.py` | 只读检查数据库、目标聊天和空输入框；不输出聊天正文 |
+| `diagnose.py` | 只列微信控件结构，不输出聊天正文；主要用于旧 UIA 后端 |
+| `config.example.json` | 不含密钥的本机配置样例 |
+| `tests/` | 不发送消息的离线测试 |
 
-## 环境与安装
+本机数据库读写适配由 [wechatauto-replica](https://github.com/fanyuantaier/wechatauto-replica) 提供，依赖版本固定为 `1.2.4.4`。该库文档说明支持微信 4.1.13.65：读取端解密微信本地 SQLCipher 数据库，发送端激活微信进程中的无障碍控件。本项目只使用单人聊天消息读取、UIA 输入和数据库回读，不使用它的全局监听、历史导出或媒体下载功能。
 
-- Windows 10/11，Python 3.11 或更新版本，已登录的 Windows 个人微信桌面版。
-- 微信主聊天窗口保持打开、电脑唤醒并解锁，且 Windows UI Automation 能读取聊天界面。
-- 微信需设置 **Enter 发送**。目前发送动作按一次 Enter；若微信使用 Ctrl+Enter，请先改回 Enter。
-- 本人持有的 DeepSeek API Key。生成回复会将忙碌说明、目标好友的新文字发送到 DeepSeek；本版不上传图片或个人档案。
+## 运行环境与安装
 
-在 PowerShell 中从仓库根目录执行：
+- Windows 10/11、**64 位 Python 3.11 或 3.12**、已登录的 Windows 个人微信 4.1.x。微信版本变化可能导致数据库或控件适配失效。
+- 电脑保持解锁，微信主窗口能正常显示。微信与本程序使用相同的普通用户权限运行。
+- 微信设为 **Enter 发送**。如当前设置为 Ctrl+Enter 发送，请先在微信设置中调整。
+- 你自己的 DeepSeek API Key。仅将新文字消息及忙碌说明发给 DeepSeek，不发送本机数据库文件。
+
+在 PowerShell 中先进入仓库根目录，再运行：
 
 ```powershell
-cd Windows
-py -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
+cd .\Windows
+python --version
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 Copy-Item config.example.json config.json
+notepad config.json
 ```
 
-若 PowerShell 阻止激活脚本，可不激活，直接使用 `.\.venv\Scripts\python.exe` 运行后续命令。`config.json`、`.venv/` 和日志文件已被 `Windows/.gitignore` 排除，勿提交包含聊天内容的配置或输出。依赖在 [pywinauto 官方文档](https://pywinauto.readthedocs.io/en/latest/)中有 UIA 说明。
+如果 `python` 命令找不到，但已安装 Python，可把上面的 `python -m venv .venv` 改为安装版 Python 的绝对路径，例如 `& 'C:\Path\To\Python312\python.exe' -m venv .venv`。此项目无需 `py` 启动器，也无需便携版 Python。虚拟环境创建后始终使用 `.\.venv\Scripts\python.exe`。
 
-## 配置 DeepSeek Key
+在 `config.json` 中把 `contact` 改为微信当前单人聊天标题里显示的**准确名称**。如果有同名好友，先在微信中给目标好友设置唯一备注；程序遇到同名会拒绝开始。`activity` 是你当前忙碌状态，`tone` 是回复语气，`duration_minutes` 为 5–480 分钟，`max_replies` 为 1–100 轮。`backend` 保持 `database`。`window_title_regex` 供旧 UIA 后端使用，数据库后端无需修改。
 
-密钥**只从环境变量读取**，不写入配置文件或仓库：
+## 配置 DeepSeek API Key
+
+密钥只通过当前 PowerShell 会话的环境变量传递，不写入 `config.json`、源代码或 Git。可用下面的方式隐藏输入：
 
 ```powershell
-$env:DEEPSEEK_API_KEY = "你自己的密钥"
+$secret = Read-Host 'DeepSeek API Key' -AsSecureString
+$env:DEEPSEEK_API_KEY = [System.Net.NetworkCredential]::new('', $secret).Password
+.\.venv\Scripts\python.exe check_connection.py
 ```
 
-这只影响当前 PowerShell 会话。不要把真实密钥粘贴到公开终端记录、截图、Issue 或 PR。默认模型为 `deepseek-flash`，请求使用 DeepSeek 官方的 [Chat Completions API](https://api-docs.deepseek.com/api/create-chat-completion/)；可在 `config.json` 的 `model` 字段改为你的账号可用的模型。
+连接检查只发送虚构测试文本。关闭这个 PowerShell 窗口后，环境变量会失效；再次运行时重新设置即可。若密钥曾在聊天或截图中公开，建议去 DeepSeek 控制台撤销并生成新密钥。默认模型是 `deepseek-flash`，请求显式关闭思考模式以生成简短回复；可在 `config.json` 中改成账号可用的其他模型。
 
-可先单独测试 AI 连接：`python check_connection.py`。如果尚未设置环境变量，程序会隐藏输入密钥；只发送一条虚构的测试文字，不读取微信。请求显式关闭思考模式，以便生成简短回复。
-
-## 找到本机微信控件
-
-1. 打开微信主窗口，进入要回复的**一位好友的私聊**。不要把群聊当作测试对象。
-2. 运行 `python diagnose.py`。它只列控件类型、`automation_id`、`class`、名称长度及窗口句柄，不输出好友名或聊天正文。这个输出仍可能包含你本机的软件结构，公开前请自行检查。
-3. 在输出中确定四个**唯一**控件，并写进 `config.json` 的 `selectors`：当前聊天标题 `chat_title`、可见消息列表 `message_list`、消息输入框 `input`，以及只在一对一聊天出现的通话按钮 `direct_chat_marker`。每个选择器至少需有 `control_type` 和一个 `automation_id`、`class_name` 或 `name`，建议优先使用唯一的 `automation_id`。`name` 会包含实际可读文本，请勿把隐私信息提交到仓库。
-4. 把 `contact` 改为当前聊天标题的**准确显示名**。`window_title_regex` 用于找到微信主窗口；若诊断显示标题长度为零，或标题随微信版本变化，需要调整本机窗口匹配方式；当前程序会拒绝在找不到唯一窗口时启动。
-
-诊断树最多显示六层。若需要更深层，可在本机临时调大 `diagnose.py` 中的深度上限。若微信控件没有可区分的标识、消息正文不可读、或行内有多个文字标签而无法分辨正文，程序会跳过这些行；这种微信版本需要针对其 UIA 树适配，不能盲目自动发送。
-
-`config.json` 还可设置：`activity`（当前忙碌说明）、`tone`（语气）、`duration_minutes`（5–480）、`max_replies`（1–100）和 `poll_seconds`。`config.example.json` 是带占位符的示例，不能直接运行。
-
-## 使用
+## 使用与测试
 
 ```powershell
-python -m unittest discover -s tests -v
-python app.py
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe check_wechat.py
+.\.venv\Scripts\python.exe app.py
 ```
 
-1. 保持目标私聊打开，清空微信输入框，点击“开始”。此时建立消息基线，不处理旧消息。
-2. 请一个获得同意的测试好友发**新的纯文字消息**。AI 草稿会显示在助手窗口；默认不会发送。
-3. 草稿确认模式下，查看草稿后点击“5 秒后确认发送”，在倒计时内切回微信目标私聊。程序会再核对聊天、消息和空输入框，然后填写并按 Enter。若微信不在前台，不发送，草稿保留。
-4. 确认本机读取方向和发送结果符合预期后，才勾选“生成后自动发送”。自动模式仍需微信窗口在前台；如果你切换聊天、自己输入文字或微信不可读取，程序会让行或暂停。
-5. 点击“停止”或关闭程序即可结束。达到时长或轮数上限也会停止。运行中的草稿和聊天上下文只在内存中，关闭后不保留。
+1. 在微信打开目标好友的**单人聊天**，确认输入框为空。配置中不要填群名。
+2. 在助手点击“开始”。程序读取最近消息作为基线，旧消息不会触发回复。开始时需要能确认当前聊天标题与配置中的好友名称相同。
+3. 请同意测试的好友发一条新的纯文字消息。助手会显示 AI 草稿，默认不会发送。
+4. 检查草稿内容后，点击“5 秒后确认发送”，并在倒计时内切回这个好友的微信窗口。程序会重新核对聊天、消息、输入框，再粘贴、按 Enter，并从本机数据库读取回执。无法确认时会暂停，**不会自动重发**。
+5. 确认这一流程在你的微信上正常后，才考虑勾选自动发送。自动发送也只在目标聊天已打开且微信位于前台时生效。
+6. 点击“停止”或关闭程序结束；达到时长或轮数上限也会结束。
 
-发送后必须在当前可见消息里看到对应的本人文字才算成功。若发送结果无法确认，会暂停本次会话，**不会重发**；请人工检查聊天记录和输入框。AI 请求失败也会暂停，以免在状态不明时继续。微信升级、锁屏、UIA 布局变化、聊天快速滚动、重复的相同文字，以及有人同时操作微信，都可能使消息判断失效。首次使用请只对同意测试的好友验证，并保持人工监督。
+若你切换聊天、手动输入草稿、微信失去焦点、消息发生变化，程序会跳过或暂停。发送后如果数据库未能确认，请人工查看微信聊天记录，避免重复发送。
 
-## 隐私与实现边界
+## 隐私与本机数据
 
-- Key 只通过进程环境变量传入 HTTPS 请求；错误信息不包含 Key。源代码和示例配置无真实密钥。
-- 未保存聊天日志、个人档案或 Key；界面仅展示本次草稿。DeepSeek 会接收新文字和忙碌说明。
-- 只对当前目标私聊建立基线，不搜索历史会话。当前可见消息不能与上一份快照衔接时重新建立基线，避免把历史消息当作新消息。
-- UIA 无法可靠确认发送时暂停，绝不自动再次按发送键。
-- 本版不具备 Mac 端的“第一屏所有好友”、个人档案、话题持续追问和媒体提示功能；这些需要针对 Windows 微信的不同版本单独验证后扩展。
+- `config.json`、`.venv/` 和 `.state/` 已被 `Windows/.gitignore` 忽略，不会随正常的 `git add .` 提交。不要把真实 Key、聊天正文、数据库缓存或截图手动加入仓库。
+- `wechatauto-replica` 首次读取时会扫描已登录微信进程内存以提取数据库密钥，并在 `Windows/.state/wechatdb/` 缓存**解密后的本机数据库和密钥**。这个目录可能包含全部本机微信聊天，不限于目标好友；请像保护微信数据目录一样保护它。停止程序后，可自行删除 `.state/` 来清除缓存，下次启动会重新提取。
+- 发送时库会在微信进程中启用无障碍控件，并使用剪贴板粘贴文字。本项目在发送前检查输入框为空、当前聊天名称准确、微信在前台；发送后从数据库查找新发出的完整文字。剪贴板如果含图片或富文本会拒绝发送；纯文字剪贴板内容会在操作后尝试恢复。
+- 本程序只把目标好友触发回复的**新文字消息**和你设置的忙碌说明发送给 DeepSeek。日志不保存聊天正文，AI 草稿只保留在本次程序内存中。
+- 这类个人微信自动化依赖客户端内部实现；微信更新、账号状态或桌面布局变化都可能导致失效。请在自己的账号上谨慎测试，并遵守所用服务的规则。
+
+## 常见问题
+
+- **“无法读取本机微信数据库”**：确认微信已登录、Python 为 64 位，且微信和本程序以相同用户权限运行。多账号登录时，先只保留要使用的账号。
+- **“目标好友的准确显示名须唯一”**：给目标好友设置唯一备注名，并把 `contact` 写成相同名称。
+- **“微信无障碍控件不可用”**：确认微信版本与适配库兼容，重启微信后再试。`diagnose.py` 只读控件树，可用于排查。
+- **没有生成草稿**：确认目标单人聊天保持打开、输入框为空；旧消息不会触发。先让测试好友发送新纯文字。
+- **已操作发送但未确认**：不要再次点击发送；先在微信中人工核对。发送方式须为 Enter 发送。
+
+旧版微信若本身提供完整 UIA 树，可在配置中选择 `backend: "uia"` 并提供四个唯一控件选择器（`chat_title`、`message_list`、`input`、`direct_chat_marker`）。当前微信 4.1.13.65 建议使用默认 `database` 后端。

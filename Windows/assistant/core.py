@@ -8,8 +8,10 @@ from time import monotonic
 
 @dataclass(frozen=True)
 class Message:
-    sender: str  # "incoming" or "outgoing"
+    sender: str  # "incoming", "outgoing", or "system"
     text: str
+    kind: str = "text"
+    identity: str = ""
 
 
 @dataclass(frozen=True)
@@ -70,7 +72,7 @@ class BusySession:
         # A human reply in the same batch takes precedence over automation.
         if not added or any(item.sender == "outgoing" for item in added):
             return None
-        incoming = [item.text for item in added if item.sender == "incoming" and item.text.strip()]
+        incoming = [item.text for item in added if item.sender == "incoming" and item.kind == "text" and item.text.strip()]
         if not incoming:
             return None
         self.pending = Candidate(self.contact, "\n".join(incoming[-3:]), snapshot.messages)
@@ -89,7 +91,7 @@ class BusySession:
             self.paused = True
             return False
         added = new_messages(self.pending.messages, snapshot.messages)
-        if not added or added[-1] != Message("outgoing", reply):
+        if not added or added[-1].sender != "outgoing" or added[-1].kind != "text" or added[-1].text != reply:
             self.paused = True
             return False
         self.sent += 1

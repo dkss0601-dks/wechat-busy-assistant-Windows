@@ -12,6 +12,7 @@ from tkinter import messagebox, ttk
 
 from assistant.core import BusySession, Candidate, Snapshot
 from assistant.deepseek import generate
+from assistant.wechat_db import WeChatDatabase
 from assistant.wechat import WeChatError, WeChatUI
 
 
@@ -21,17 +22,21 @@ HERE = Path(__file__).resolve().parent
 def load_config() -> dict:
     path = HERE / "config.json"
     if not path.exists():
-        raise ValueError("请先复制 config.example.json 为 config.json，并填写目标好友和控件选择器")
+        raise ValueError("请先复制 config.example.json 为 config.json，并填写目标好友")
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data.get("contact"), str) or not data["contact"].strip():
         raise ValueError("请填写目标好友的准确显示名")
-    selectors = data.get("selectors", {})
-    for key in ("chat_title", "message_list", "input", "direct_chat_marker"):
-        value = selectors.get(key)
-        if not isinstance(value, dict) or not value.get("control_type") or not any(
-            value.get(field) for field in ("automation_id", "name", "class_name")
-        ) or "请用诊断工具" in str(value):
-            raise ValueError(f"请填写 selectors.{key}，且保证它在窗口中唯一")
+    backend = data.get("backend", "database")
+    if backend == "uia":
+        selectors = data.get("selectors", {})
+        for key in ("chat_title", "message_list", "input", "direct_chat_marker"):
+            value = selectors.get(key)
+            if not isinstance(value, dict) or not value.get("control_type") or not any(
+                value.get(field) for field in ("automation_id", "name", "class_name")
+            ) or "请用诊断工具" in str(value):
+                raise ValueError(f"请填写 selectors.{key}，且保证它在窗口中唯一")
+    elif backend != "database":
+        raise ValueError("backend 只能是 database 或 uia")
     minutes = int(data.get("duration_minutes", 30))
     limit = int(data.get("max_replies", 5))
     if not 5 <= minutes <= 480 or not 1 <= limit <= 100:
@@ -51,7 +56,7 @@ class AssistantApp:
         self.root.title("忙碌消息助手 · Windows")
         self.root.geometry("600x430")
         self.config: dict | None = None
-        self.wechat: WeChatUI | None = None
+        self.wechat: WeChatUI | WeChatDatabase | None = None
         self.session: BusySession | None = None
         self.reply: str | None = None
         self.waiting: Candidate | None = None
@@ -101,7 +106,9 @@ class AssistantApp:
             config = load_config()
             if not os.environ.get("DEEPSEEK_API_KEY", "").strip():
                 raise ValueError("请先设置 DEEPSEEK_API_KEY 环境变量")
-            wechat = WeChatUI(config["window_title_regex"], config["selectors"])
+            wechat = (WeChatDatabase(config["contact"])
+                      if config.get("backend", "database") == "database"
+                      else WeChatUI(config["window_title_regex"], config["selectors"]))
             first = wechat.snapshot()
             if first.contact != config["contact"] or not first.is_direct:
                 raise ValueError("请先打开配置中指定好友的一对一私聊，并检查直聊标记")
