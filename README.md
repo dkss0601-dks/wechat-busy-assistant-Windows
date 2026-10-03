@@ -4,14 +4,14 @@
 
 | 目录 | 内容 | 状态 |
 | --- | --- | --- |
-| [Mac](Mac/) | 当前 macOS 版源码、测试、图标、构建工具与说明 | 0.6.0（构建 7） |
+| [Mac](Mac/) | 当前 macOS 版源码、测试、图标、构建工具与说明 | 0.6.3（构建 11） |
 | [Windows](Windows/) | 预留的 Windows 版目录 | 尚未添加代码 |
 
 ## Mac 版
 
 使用和构建步骤见 [Mac README](Mac/README.md)，详细说明见 [使用说明](Mac/01_文档/使用说明.md)、[开发维护](Mac/01_文档/开发维护.md)与[版本记录](Mac/01_文档/版本记录.md)。
 
-现有安装包位于 [Releases 下载页](https://github.com/jaysoncbh/wechat-busy-assistant-macos/releases)。
+已发布的安装包位于 [Releases 下载页](https://github.com/jaysoncbh/wechat-busy-assistant-macos/releases)；安装包版本以该页面标注为准。
 
 ## 目录结构
 

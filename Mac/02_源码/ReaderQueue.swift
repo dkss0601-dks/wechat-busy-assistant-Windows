@@ -5,15 +5,93 @@ struct ChatCandidate {
     let name: String
     let signature: String
     let unread: Int
+    var lastMessageAt: Date? = nil
+    var preview: String? = nil
 }
 
-func unreadCount(_ label: String) -> Int {
-    for pattern in ["(\\d+) unread message", "(\\d+)条未读", "(\\d+) 条未读"] {
+func chatListTime(_ value: String, now: Date = Date()) -> Date? {
+    let value = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    let calendar = Calendar.current
+    if value.range(of: "^\\d{1,2}:\\d{2}$", options: .regularExpression) != nil {
+        let parts = value.split(separator: ":").compactMap { Int($0) }
+        guard parts.count == 2, (0..<24).contains(parts[0]), (0..<60).contains(parts[1]) else { return nil }
+        return calendar.date(bySettingHour: parts[0], minute: parts[1], second: 0, of: now)
+    }
+    for format in ["yyyy/MM/dd", "yyyy-MM-dd", "yyyy/MM/dd HH:mm", "yyyy-MM-dd HH:mm"] {
+        let formatter = DateFormatter(); formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = calendar.timeZone; formatter.dateFormat = format; formatter.isLenient = false
+        if let date = formatter.date(from: value), formatter.string(from: date) == value { return date }
+    }
+    if ["Yesterday", "昨天"].contains(value) { return calendar.date(byAdding: .day, value: -1, to: calendar.startOfDay(for: now)) }
+    return nil
+}
+
+private func unreadBadgeCount(_ label: String) -> Int {
+    for pattern in ["^(\\d+) unread message(?:\\(s\\)|s)?$", "^(\\d+)\\s*条未读(?:消息)?$"] {
         if let regex = try? NSRegularExpression(pattern: pattern),
            let match = regex.firstMatch(in: label, range: NSRange(label.startIndex..., in: label)),
            let range = Range(match.range(at: 1), in: label) { return Int(label[range]) ?? 0 }
     }
     return 0
+}
+
+func chatCandidate(_ label: String, now: Date = Date()) -> ChatCandidate? {
+    let fields = label.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+    guard let name = fields.first, !name.isEmpty,
+          let timeIndex = fields.indices.dropFirst().last(where: { chatListTime(fields[$0], now: now) != nil }) else { return nil }
+    // Only metadata after the row's timestamp can supply an unread badge.
+    // Numbers or badge-like phrases in the friend's name/preview are content.
+    let unread = fields.dropFirst(timeIndex + 1).map(unreadBadgeCount).max() ?? 0
+    return ChatCandidate(name: name, signature: fields.prefix(timeIndex + 1).joined(separator: ","), unread: unread,
+        lastMessageAt: chatListTime(fields[timeIndex], now: now), preview: fields[1..<timeIndex].joined(separator: ","))
+}
+
+func unreadCount(_ label: String) -> Int { chatCandidate(label)?.unread ?? 0 }
+
+enum MediaPreviewKind: String {
+    case sticker = "表情包", image = "图片", video = "视频", voice = "语音", other = "其他媒体"
+}
+
+func mediaPreviewKind(_ preview: String?) -> MediaPreviewKind? {
+    guard let lowered = preview?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() else { return nil }
+    let markers: [(String, MediaPreviewKind)] = [
+        ("[sticker]", .sticker), ("[动画表情]", .sticker),
+        ("[image]", .image), ("[photo]", .image), ("[picture]", .image), ("[图片]", .image),
+        ("[video]", .video), ("[视频]", .video),
+        ("[voice]", .voice), ("[语音]", .voice)
+    ]
+    for (marker, kind) in markers where lowered.hasPrefix(marker) {
+        let remainder = lowered.dropFirst(marker.count)
+        if remainder.isEmpty || remainder.first?.isWhitespace == true { return kind }
+    }
+    if lowered.first == "[", let close = lowered.firstIndex(of: "]"),
+       lowered.distance(from: lowered.startIndex, to: close) <= 25 {
+        let remainder = lowered[lowered.index(after: close)...]
+        if remainder.isEmpty || remainder.first?.isWhitespace == true { return .other }
+    }
+    return nil
+}
+
+func candidateIsRecent(_ candidate: ChatCandidate, startedAt: Date, now: Date = Date()) -> Bool {
+    guard let date = candidate.lastMessageAt else { return false }
+    // WeChat's list clock is minute-resolution. Unknown/dates before startup
+    // never justify replaying unread history or rendering old visible rows.
+    let cutoff = Date(timeIntervalSince1970: floor(startedAt.timeIntervalSince1970 / 60) * 60)
+    return date >= cutoff && date <= now.addingTimeInterval(60)
+}
+
+func candidateMatchesLatestMessage(_ candidate: ChatCandidate, snapshot: Snapshot) -> Bool {
+    guard let preview = candidate.preview, !preview.isEmpty,
+          let row = latestMessageRow(snapshot.rows),
+          let message = parseMessage(row, contact: snapshot.name) else { return false }
+    func normalized(_ text: String) -> String { text.split(whereSeparator: { $0.isWhitespace }).joined() }
+    let expected = normalized(preview), actual = normalized(message.text)
+    if expected == actual { return true }
+    if expected.hasSuffix("…") || expected.hasSuffix("...") {
+        let prefix = String(expected.dropLast(expected.hasSuffix("...") ? 3 : 1))
+        return prefix.count >= 4 && actual.hasPrefix(prefix)
+    }
+    return false
 }
 
 func newUnreadCount(old: ChatCandidate?, new: ChatCandidate) -> Int {
@@ -151,9 +229,9 @@ extension WeChatReader {
         try firstScreenRows(table).compactMap { row in
             guard let cell = firstDescendant(row, depth: 4, matching: { string($0, "AXIdentifier").hasPrefix("MMChatsTableCellView") }) else { return nil }
             let label = firstString(cell, ["AXDescription", "AXTitle", "AXValue"])
-            let name = String(label.prefix { $0 != "," }).trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !name.isEmpty, !["Official Accounts", "公众号", "File Transfer", "文件传输助手", "WeChat Team", "微信团队"].contains(name) else { return nil }
-            return (ChatCandidate(name: name, signature: label, unread: unreadCount(label)), row)
+            guard let candidate = chatCandidate(label),
+                  !["Official Accounts", "公众号", "File Transfer", "文件传输助手", "WeChat Team", "微信团队"].contains(candidate.name) else { return nil }
+            return (candidate, row)
         }
     }
     @MainActor func firstScreenTable(valid: () -> Bool) async throws -> AXUIElement {

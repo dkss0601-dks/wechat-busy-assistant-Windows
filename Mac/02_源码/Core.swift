@@ -28,6 +28,12 @@ struct Message: Equatable {
     let mine: Bool
 }
 
+struct MediaMessage: Equatable {
+    let raw: String
+    let kind: MediaPreviewKind
+    let mine: Bool
+}
+
 // Only accept explicit sender labels exposed by this WeChat version.
 // Unknown sender labels, timestamps and media are never passed to the model.
 func parseMessage(_ raw: String, contact: String) -> Message? {
@@ -38,6 +44,33 @@ func parseMessage(_ raw: String, contact: String) -> Message? {
         }
     }
     return nil
+}
+
+func parseMediaMessage(_ raw: String, contact: String) -> MediaMessage? {
+    let prefixes: [(String, Bool)] = [
+        ("\(contact):Sent a", false), ("\(contact):Sent an", false),
+        ("Me:Sent a", true), ("Me:Sent an", true),
+        ("\(contact):发送了", false), ("我:发送了", true)
+    ]
+    guard let (prefix, mine) = prefixes.first(where: { raw.hasPrefix($0.0) }) else { return nil }
+    let description = String(raw.dropFirst(prefix.count).split(separator: ",", maxSplits: 1,
+        omittingEmptySubsequences: false).first ?? "").lowercased()
+    let markers: [(MediaPreviewKind, [String])] = [
+        (.sticker, ["sticker", "动画表情"]),
+        (.image, ["photo", "image", "picture", "图片"]),
+        (.video, ["video", "视频"]),
+        (.voice, ["voice", "语音"])
+    ]
+    let kind = markers.first(where: { $0.1.contains(where: description.contains) })?.0 ?? .other
+    return MediaMessage(raw: raw, kind: kind, mine: mine)
+}
+
+func latestMessageRow(_ rows: [String]) -> String? {
+    rows.last(where: { $0.contains("Said:") || $0.contains(":Sent a") || $0.contains(":发送了") })
+}
+
+func latestMediaMessage(_ snapshot: Snapshot) -> MediaMessage? {
+    latestMessageRow(snapshot.rows).flatMap { parseMediaMessage($0, contact: snapshot.name) }
 }
 
 // Require overlap with the prior visible history; never guess when scrolling
@@ -82,6 +115,28 @@ func confirmedReply(previous: [String], current: [String], contact: String, text
     return SendReceipt(rows: Array(current.dropLast(added.count - index - 1)),
         arrivedBeforeReply: added.prefix(index).compactMap { parseMessage($0, contact: contact).flatMap { $0.mine ? nil : $0.text } })
 }
+
+func backgroundReturnEvents() throws -> (CGEvent, CGEvent) {
+    let source = CGEventSource(stateID: .privateState)
+    guard let down = CGEvent(keyboardEventSource: source, virtualKey: 0x24, keyDown: true),
+          let up = CGEvent(keyboardEventSource: source, virtualKey: 0x24, keyDown: false) else {
+        throw AssistantError(message: "无法创建发送按键。")
+    }
+    // A background AppKit responder needs an explicit Return character, not
+    // only its physical key code. Do not inherit modifiers from the user's app.
+    var carriageReturn: UniChar = 0x0D
+    for event in [down, up] {
+        event.flags = []
+        event.keyboardSetUnicodeString(stringLength: 1, unicodeString: &carriageReturn)
+    }
+    return (down, up)
+}
+
+func fileTransferDiagnosticAllowed(name: String, isDirect: Bool) -> Bool {
+    !isDirect && ["File Transfer", "文件传输助手"].contains(name)
+}
+
+let returnDiagnosticText = "忙碌消息助手：后台回车发送检查（仅文件传输助手，不调用 AI）。"
 
 final class WeChatReader {
     func attribute(_ element: AXUIElement, _ key: String) -> CFTypeRef? {
@@ -180,18 +235,28 @@ final class WeChatReader {
     }
 
     @MainActor func send(_ text: String, expected: Snapshot, stillActive: () -> Bool) async throws -> SendReceipt {
+        try await performSend(text, expected: expected, selfDiagnostic: false, stillActive: stillActive)
+    }
+
+    @MainActor func checkReturnToFileTransfer(expected: Snapshot, stillActive: () -> Bool) async throws -> SendReceipt {
+        guard fileTransferDiagnosticAllowed(name: expected.name, isDirect: expected.isDirect) else {
+            throw AssistantError(message: "发送键检查只允许文件传输助手，不向好友发送检查文字。")
+        }
+        return try await performSend(returnDiagnosticText, expected: expected, selfDiagnostic: true, stillActive: stillActive)
+    }
+
+    @MainActor private func performSend(_ text: String, expected: Snapshot, selfDiagnostic: Bool,
+                                       stillActive: () -> Bool) async throws -> SendReceipt {
+        func eligible(_ snapshot: Snapshot) -> Bool {
+            selfDiagnostic ? fileTransferDiagnosticAllowed(name: snapshot.name, isDirect: snapshot.isDirect) : snapshot.isDirect
+        }
         try requireBackground(stillActive)
         guard NSRunningApplication(processIdentifier: expected.pid)?.bundleIdentifier == "com.tencent.xinWeChat" else { throw RetryLater(message: "微信进程已变化，重新核对后继续。") }
         let before = try snapshot()
-        guard before.pid == expected.pid, before.isDirect, before.name == expected.name, before.rows == expected.rows, before.draft.isEmpty else {
+        guard before.pid == expected.pid, eligible(before), before.name == expected.name, before.rows == expected.rows, before.draft.isEmpty else {
             throw RetryLater(message: "消息或输入框有变化，暂缓发送并重新核对。")
         }
-        let source = CGEventSource(stateID: .hidSystemState)
-        guard let down = CGEvent(keyboardEventSource: source, virtualKey: 0x24, keyDown: true),
-              let up = CGEvent(keyboardEventSource: source, virtualKey: 0x24, keyDown: false) else {
-            throw AssistantError(message: "无法创建发送按键。")
-        }
-        down.flags = []; up.flags = []
+        let (down, up) = try backgroundReturnEvents()
         var filled = false
         var posted = false
         do {
@@ -204,9 +269,23 @@ final class WeChatReader {
                 throw RetryLater(message: "微信暂不接受后台填写，稍后重试。")
             }
             filled = true
+            // Setting AXValue may rebuild WeChat's editor and reset its internal
+            // responder. Reacquire focus on the actual filled input before Return.
+            try await Task.sleep(nanoseconds: 100_000_000)
+            try requireBackground(stillActive)
+            let filledSnapshot = try snapshot()
+            guard filledSnapshot.pid == expected.pid, eligible(filledSnapshot),
+                  filledSnapshot.name == expected.name, filledSnapshot.rows == expected.rows,
+                  filledSnapshot.draft == text else {
+                throw RetryLater(message: "填写后聊天发生变化，未按发送键。")
+            }
+            guard AXUIElementSetAttributeValue(filledSnapshot.input, "AXFocused" as CFString, kCFBooleanTrue) == .success else {
+                throw RetryLater(message: "填写后微信输入焦点暂未就绪，稍后重新核对。")
+            }
+            try await Task.sleep(nanoseconds: 50_000_000)
             let ready = try snapshot()
             try requireBackground(stillActive)
-            guard ready.isDirect, ready.name == expected.name, ready.rows == expected.rows, ready.draft == text else {
+            guard ready.pid == expected.pid, eligible(ready), ready.name == expected.name, ready.rows == expected.rows, ready.draft == text else {
                 throw RetryLater(message: "发送前界面有变化，重新核对后继续。")
             }
             // Deliver to WeChat's process; never activate it or send global input.

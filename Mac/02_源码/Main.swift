@@ -24,7 +24,7 @@ import SwiftUI
             selfTest()
             profileRulesTests()
             conversationRulesTests()
-            _ = MainActor.assumeIsolated { Task { await lifecycleTests(); await profileLifecycleTests(); await conversationLifecycleTests(); await firstScreenLifecycleTests(); await firstScreenAlignmentTests(); activityDescriptionTests(); exit(0) } }
+            _ = MainActor.assumeIsolated { Task { await lifecycleTests(); await profileLifecycleTests(); await conversationLifecycleTests(); await firstScreenLifecycleTests(); await firstScreenAlignmentTests(); activityDescriptionTests(); await freshnessTests(); exit(0) } }
             RunLoop.main.run(); return
         }
         MainActor.assumeIsolated {

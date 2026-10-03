@@ -51,6 +51,7 @@ source_files=(
     '03_测试/ConversationTests.swift'
     '03_测试/FirstScreenTests.swift'
     '03_测试/ActivityTests.swift'
+    '03_测试/FreshnessTests.swift'
 )
 /usr/bin/xcrun swiftc -swift-version 5 -O "${source_files[@]}" \
     -o "$app_path/Contents/MacOS/PracticeAssistant" \

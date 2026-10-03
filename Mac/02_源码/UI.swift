@@ -197,7 +197,7 @@ struct AssistantView: View {
                     Text("先在微信打开目标好友的聊天，再点击选定。切换到其他聊天后，仅从第一屏重新定位这位好友。").font(.system(size: 12)).foregroundStyle(.secondary)
                 } else {
                     Label("仅第一屏 · 排除群聊、公众号及第一屏内的同名会话", systemImage: "person.2.slash").font(.system(size: 12)).foregroundStyle(.secondary)
-                    Text("启动时只为第一屏建立基线，已有未读消息不回复。之后只读取第一屏，不向下翻找；首次进入第一屏的未读会话只检查最新一条。每位好友独立保存上下文，\(model.replyLimitSummary)。").font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    Text("启动时只为第一屏建立基线，已有未读消息不回复。之后只读取第一屏，不向下翻找；仅处理能核对为本次开始后到达的消息；历史时间、无法核对的时间及尚未加载的新消息不回复。首次进入第一屏的未读会话只检查最新一条。每位好友独立保存上下文，\(model.replyLimitSummary)。").font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
             }
             sessionSettings
@@ -445,10 +445,12 @@ struct AssistantView: View {
                 HStack {
                     Button("检查后台操作") { model.testBackground() }.disabled(model.running || model.busy)
                     Text(model.backgroundStatus).font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    Button("检查回车发送（仅文件传输助手）") { model.testReturnSending() }.disabled(model.running || model.busy)
+                    Text(model.returnCheckStatus).font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
                 Text("后台检查只在第一屏选择已读会话进行切换与还原，短暂填写检查文字后清除；不调用 AI，不发送消息。").font(.system(size: 12)).foregroundStyle(.secondary)
                 Divider()
-                Text("保持 Mac 唤醒、解锁，微信登录并保留主聊天窗口；它可以被其他应用遮住。当前处理文字消息；语音、图片和表情不做识别。").font(.system(size: 13)).foregroundStyle(.secondary)
+                Text("保持 Mac 唤醒、解锁，微信登录并保留主聊天窗口；它可以被其他应用遮住。文字使用 DeepSeek；新图片和表情包仅回复固定提示，不识别画面；视频和语音不自动回复。").font(.system(size: 13)).foregroundStyle(.secondary)
                 Text("开启忙碌模式后，所选范围内的新文字、最近几轮上下文，以及你启用的已保存个人档案会发送给 DeepSeek 生成回复。").font(.system(size: 12)).foregroundStyle(.secondary)
             }
         }

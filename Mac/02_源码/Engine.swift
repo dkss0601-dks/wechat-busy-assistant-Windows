@@ -95,6 +95,7 @@ func textAfterLastManualReply(_ messages: [Message]) -> String? {
     @Published var connectionStatus = "未测试"
     @Published var scanStatus = "尚未检查微信列表"
     @Published var backgroundStatus = "尚未检查后台切换"
+    @Published var returnCheckStatus = "只在你自己的文件传输助手发送一条固定检查文字。"
     private let reader: any ChatAccess
     private let isolatedTest: Bool
     private let profileStore: ProfileStore?
@@ -107,6 +108,7 @@ func textAfterLastManualReply(_ messages: [Message]) -> String? {
     private var timer: Timer?
     private var generation = UUID()
     private var deadline = Date.distantPast
+    private var startedAt = Date.distantPast
     private var pending: Snapshot?
     private var pendingHistory: [[String: String]] = []
     private var task: Task<Void, Never>?
@@ -123,6 +125,7 @@ func textAfterLastManualReply(_ messages: [Message]) -> String? {
     private var workspaceObservers: [NSObjectProtocol] = []
     private var states: [String: ContactState] = [:]
     private var seen: [String: ChatCandidate] = [:]
+    private var awaitingBodies: Set<String> = []
     private var activeSelected = ""
 
     init(reader: any ChatAccess = WeChatReader(), isolatedTest: Bool = false, profileStore: ProfileStore? = nil,
@@ -214,7 +217,7 @@ func textAfterLastManualReply(_ messages: [Message]) -> String? {
             guard s.draft.isEmpty else { throw AssistantError(message: "微信里有未发送内容，请先处理。") }
             if scope == .selected { guard s.isDirect, !contact.isEmpty, s.name == contact else { throw AssistantError(message: "请打开目标好友私聊，并选定该好友。") } }
             try beginLog()
-            generation = UUID(); states = [:]; seen = [:]; rounds = 0; friendCount = 0; log = []
+            generation = UUID(); states = [:]; seen = [:]; awaitingBodies = []; rounds = 0; friendCount = 0; log = []
             draft = ""; pending = nil; pendingApproved = false; baselineReady = false; activeSelected = contact
             activeScope = scope; activeAuto = autoSend; activeLimit = unlimitedReplies ? nil : limit; activeModel = modelName
             activeExpansion = expansion
@@ -230,7 +233,8 @@ func textAfterLastManualReply(_ messages: [Message]) -> String? {
                 defaults.set(autoSend, forKey: "v3.autoSend"); defaults.set(modelName, forKey: "v3.model")
                 defaults.set(unlimitedReplies, forKey: "v5.unlimitedReplies")
             }
-            deadline = Date().addingTimeInterval(Double(minutes * 60)); running = true
+            startedAt = Date()
+            deadline = startedAt.addingTimeInterval(Double(minutes * 60)); running = true
             record("开始", "\(scope.rawValue) · \(minutes)分钟 · \(replyLimitSummary) · \(autoSend ? "自动发送" : "草稿确认")。状态：\(activity)")
             status = "忙碌模式已开启，正在准备后台监听。"
             if !isolatedTest {
@@ -297,46 +301,179 @@ func textAfterLastManualReply(_ messages: [Message]) -> String? {
             baselineReady = true
         }
         // Existing user text is never overwritten, even in a different chat.
-        let visible = try reader.snapshot()
+        var visible = try reader.snapshot()
         guard visible.draft.isEmpty else { throw RetryLater(message: "微信留有未发送文字，处理后会自动继续。") }
         if let expected = pending {
             let now = try await reader.openChat(name: expected.name, valid: { self.valid(id) })
             guard now.draft.isEmpty else { throw RetryLater(message: "目标好友有未发送文字，暂缓发送。") }
             if now.rows != expected.rows {
                 clearPending()
-                try await processCurrent(now, id: id)
+                if activeScope == .selected {
+                    try await processCurrent(now, id: id)
+                    return
+                }
+                visible = now // all-friends must reacquire new list evidence below
             } else if activeAuto || pendingApproved {
                 pending = now
                 try await sendPending(id)
-            } else { status = "给 \(expected.name) 的草稿已准备好，等待确认。" }
-            return
+                return
+            } else { status = "给 \(expected.name) 的草稿已准备好，等待确认。"; return }
         }
         if activeScope == .selected {
             let current = try await reader.openChat(name: activeSelected, valid: { self.valid(id) })
             try await processCurrent(current, id: id)
             return
         }
-        if visible.isDirect, states[visible.name] != nil {
-            if try await processCurrent(visible, id: id) { return }
-        }
-        for (name, state) in states where !state.paused && !state.waiting.isEmpty && Date() >= max(state.manualUntil, state.retryAfter) {
-            let current = try await reader.openChat(name: name, valid: { self.valid(id) })
-            if try await processCurrent(current, id: id) { return }
-        }
         let candidates: [ChatCandidate]
         if let firstScreenBaseline { candidates = firstScreenBaseline }
         else { candidates = try await reader.scanChats(valid: { self.valid(id) }) }
+        var awaitingBody = false
+        for (name, state) in states where !state.paused && !state.waiting.isEmpty && Date() >= max(state.manualUntil, state.retryAfter) {
+            guard let candidate = candidates.first(where: { $0.name == name }),
+                  candidateIsRecent(candidate, startedAt: startedAt) else { continue }
+            let current = try await reader.openChat(name: name, valid: { self.valid(id) })
+            visible = current
+            guard candidateMatchesLatestMessage(candidate, snapshot: current) else { continue }
+            if try await processCurrent(current, id: id) { return }
+        }
         for candidate in candidates {
             let old = seen[candidate.name]
             // A newly visible conversation has no full-list baseline. Never replay
             // its accumulated unread history; only the newest unread row is eligible.
             let delta = old == nil ? min(1, candidate.unread) : newUnreadCount(old: old, new: candidate)
-            if candidate.unread == 0 { seen[candidate.name] = candidate; continue }
+            guard candidateIsRecent(candidate, startedAt: startedAt) else {
+                awaitingBodies.remove(candidate.name)
+                if candidate.unread > 0, old?.signature != candidate.signature {
+                    record("跳过", "列表时间早于本次开启或无法核对，已有未读消息未处理。", contact: candidate.name)
+                }
+                seen[candidate.name] = candidate
+                continue
+            }
+            if let kind = mediaPreviewKind(candidate.preview), kind == .video || kind == .voice {
+                awaitingBodies.remove(candidate.name)
+                if old?.signature != candidate.signature {
+                    record("跳过媒体", "收到\(kind.rawValue)预览，本版不自动回复。", contact: candidate.name)
+                }
+                seen[candidate.name] = candidate
+                continue
+            }
+            if candidate.unread == 0 {
+                // A currently open chat can read new messages automatically,
+                // but a changed viewport alone is never evidence of a delivery.
+                guard let old, old.signature != candidate.signature,
+                      states[candidate.name]?.paused != true else {
+                    awaitingBodies.remove(candidate.name)
+                    seen[candidate.name] = candidate
+                    continue
+                }
+                if let state = states[candidate.name], Date() < max(state.manualUntil, state.retryAfter) {
+                    continue
+                }
+                let current: Snapshot
+                if visible.isDirect, visible.name == candidate.name { current = visible }
+                else if awaitingBodies.contains(candidate.name) {
+                    current = try await reader.openChat(name: candidate.name, valid: { self.valid(id) })
+                    visible = current
+                } else {
+                    seen[candidate.name] = candidate
+                    continue
+                }
+                guard current.draft.isEmpty else { throw RetryLater(message: "该好友有未发送内容，暂缓处理。") }
+                guard current.isDirect, current.name == candidate.name else {
+                    awaitingBodies.remove(candidate.name)
+                    seen[candidate.name] = candidate
+                    continue
+                }
+                if let kind = mediaPreviewKind(candidate.preview),
+                   let media = latestMediaMessage(current), media.kind == kind {
+                    if let state = states[candidate.name], !state.rows.isEmpty {
+                        guard let added = appendedRows(previous: state.rows, current: current.rows) else {
+                            resync(current); seen[candidate.name] = candidate; continue
+                        }
+                        guard added.contains(media.raw) else {
+                            awaitingBodies.insert(candidate.name); awaitingBody = true; continue
+                        }
+                        if added.contains(where: { parseMessage($0, contact: current.name) != nil }) {
+                            awaitingBodies.remove(candidate.name); seen[candidate.name] = candidate
+                            try await process(added, snapshot: current, id: id)
+                            return
+                        }
+                    }
+                    awaitingBodies.remove(candidate.name)
+                    seen[candidate.name] = candidate
+                    if kind == .other, !media.mine {
+                        var state = states[candidate.name] ?? ContactState()
+                        state.rows = current.rows; states[candidate.name] = state
+                        record("跳过媒体", "列表显示暂不支持的媒体类型，未自动回复。", contact: candidate.name)
+                        continue
+                    }
+                    prepareMediaReply(media, snapshot: current, id: id)
+                    return
+                }
+                guard candidateMatchesLatestMessage(candidate, snapshot: current) else {
+                    // Do not consume the list change while WeChat is still
+                    // showing the old body after a chat switch or auto-read.
+                    awaitingBodies.insert(candidate.name)
+                    awaitingBody = true
+                    continue
+                }
+                awaitingBodies.remove(candidate.name)
+                seen[candidate.name] = candidate
+                if states[candidate.name] == nil {
+                    // This chat was not open at startup, so it has no row
+                    // baseline. The changed list preview proves only its
+                    // latest matching incoming text is eligible.
+                    guard let row = current.rows.last(where: { parseMessage($0, contact: current.name) != nil }),
+                          let message = parseMessage(row, contact: current.name), !message.mine else {
+                        states[candidate.name] = ContactState(rows: current.rows)
+                        continue
+                    }
+                    try await process([row], snapshot: current, id: id)
+                    return
+                }
+                if try await processCurrent(current, id: id) { return }
+                continue
+            }
             guard delta > 0, states[candidate.name]?.paused != true else { continue }
             if let state = states[candidate.name], Date() < max(state.manualUntil, state.retryAfter) { continue }
             let s = try await reader.openChat(name: candidate.name, valid: { self.valid(id) })
+            visible = s
             guard s.draft.isEmpty else { throw RetryLater(message: "该好友有未发送内容，暂缓处理。") }
             guard s.isDirect else { seen[candidate.name] = candidate; record("跳过", "群聊或无法确认的一对一会话，不自动回复。", contact: s.name); continue }
+            if let kind = mediaPreviewKind(candidate.preview),
+               let media = latestMediaMessage(s), media.kind == kind {
+                if let state = states[s.name], !state.rows.isEmpty {
+                    guard let added = appendedRows(previous: state.rows, current: s.rows) else {
+                        resync(s); seen[candidate.name] = candidate; continue
+                    }
+                    guard added.contains(media.raw) else {
+                        awaitingBodies.insert(candidate.name); awaitingBody = true; continue
+                    }
+                    if added.contains(where: { parseMessage($0, contact: s.name) != nil }) {
+                        awaitingBodies.remove(candidate.name); seen[candidate.name] = candidate
+                        try await process(added, snapshot: s, id: id)
+                        return
+                    }
+                }
+                awaitingBodies.remove(candidate.name)
+                seen[candidate.name] = candidate
+                if kind == .other, !media.mine {
+                    var state = states[candidate.name] ?? ContactState()
+                    state.rows = s.rows; states[candidate.name] = state
+                    record("跳过媒体", "列表显示暂不支持的媒体类型，未自动回复。", contact: candidate.name)
+                    continue
+                }
+                prepareMediaReply(media, snapshot: s, id: id)
+                return
+            }
+            guard candidateMatchesLatestMessage(candidate, snapshot: s) else {
+                // Chat switches may briefly expose cached history. Do not mark
+                // it consumed; retry only once the list preview matches the row.
+                awaitingBodies.insert(candidate.name)
+                awaitingBody = true
+                continue
+            }
+            awaitingBodies.remove(candidate.name)
             let added: [String]
             if let state = states[s.name], !state.rows.isEmpty {
                 guard let appended = appendedRows(previous: state.rows, current: s.rows) else {
@@ -352,7 +489,8 @@ func textAfterLastManualReply(_ messages: [Message]) -> String? {
             seen[candidate.name] = candidate
             try await process(added, snapshot: s, id: id); return
         }
-        status = "正在等待新消息 · 微信第一屏的未读私聊"
+        status = awaitingBody ? "聊天正文与列表的新消息尚未一致，等待微信加载；旧文字不回复。"
+            : "正在等待新消息 · 微信第一屏的未读私聊"
     }
 
     func valid(_ id: UUID) -> Bool { running && generation == id && Date() < deadline && sessionIsActive }
@@ -364,6 +502,46 @@ func textAfterLastManualReply(_ messages: [Message]) -> String? {
         record("重新核对", "界面历史发生变化，建立新的基线；历史内容不补发。", contact: snapshot.name)
         status = "已重新核对聊天，等待新文字消息；忙碌模式保持开启。"
     }
+    func prepareMediaReply(_ media: MediaMessage, snapshot: Snapshot, id: UUID) {
+        guard valid(id) else { return }
+        var state = states[snapshot.name] ?? ContactState()
+        state.rows = snapshot.rows
+        if media.mine {
+            state.manualUntil = Date().addingTimeInterval(60)
+            state.waiting = ""; state.history = []; state.failures = 0
+            states[snapshot.name] = state
+            if draftContact == snapshot.name { clearPending() }
+            record("本人接管", "检测到本人发送媒体，让行这位好友 60 秒。", contact: snapshot.name)
+            status = "已让行这位好友 60 秒，忙碌模式继续。"
+            return
+        }
+        if SessionChoices.reachedLimit(rounds: state.rounds, limit: activeLimit) {
+            state.paused = true; states[snapshot.name] = state
+            record("暂停好友", "已达到回复上限。", contact: snapshot.name)
+            return
+        }
+        if !state.waiting.isEmpty {
+            states[snapshot.name] = state
+            record("跳过媒体", "已有待处理的文字，本次媒体不另发固定回复。", contact: snapshot.name)
+            return
+        }
+        states[snapshot.name] = state
+        let description = media.kind == .sticker ? "表情包" : "图片"
+        let introduction = state.rounds == 0 ? "我是临时回复助手。" : ""
+        let reply = media.kind == .sticker
+            ? "\(introduction)我目前还无法识别这个表情包的具体内容。方便的话，请用文字告诉我你想表达什么。"
+            : "\(introduction)我目前还无法识别这张图片的具体内容。方便的话，请用文字描述一下。"
+        received = "收到\(description)（内容未识别）"; draftContact = snapshot.name
+        pendingHistory = Array((state.history + [
+            ["role": "user", "content": "对方发送了\(description)，具体内容未识别。"],
+            ["role": "assistant", "content": reply]
+        ]).suffix(8))
+        draft = reply; pending = snapshot; pendingApproved = false
+        record("收到媒体", "收到\(description)，未读取媒体内容。", contact: snapshot.name)
+        record("固定草稿", reply, contact: snapshot.name)
+        if activeAuto { status = "\(description)提示已准备好，正在等待后台核对发送。" }
+        else { status = "给 \(snapshot.name) 的\(description)提示已准备好，等待确认。"; page = "总览" }
+    }
     @discardableResult func processCurrent(_ current: Snapshot, id: UUID) async throws -> Bool {
         guard current.isDirect else { throw RetryLater(message: "等待目标好友的私聊界面。") }
         guard current.draft.isEmpty else { throw RetryLater(message: "输入框有未发送文字，处理后继续。") }
@@ -374,6 +552,13 @@ func textAfterLastManualReply(_ messages: [Message]) -> String? {
         guard let added = appendedRows(previous: state.rows, current: current.rows) else { resync(current); return true }
         guard !added.isEmpty || !state.waiting.isEmpty else {
             status = "后台监听中，等待新的文字消息。"; return false
+        }
+        if state.waiting.isEmpty,
+           let media = latestMediaMessage(current), added.contains(media.raw),
+           (media.mine || media.kind == .sticker || media.kind == .image),
+           !added.contains(where: { parseMessage($0, contact: current.name) != nil }) {
+            prepareMediaReply(media, snapshot: current, id: id)
+            return true
         }
         try await process(added, snapshot: current, id: id)
         return true
@@ -598,6 +783,23 @@ func textAfterLastManualReply(_ messages: [Message]) -> String? {
             }
         }
     }
+    func testReturnSending() {
+        guard !running, !busy, let native = reader as? WeChatReader else { return }
+        busy = true; returnCheckStatus = "正在检查文件传输助手的后台回车发送…"
+        Task {
+            defer { self.busy = false }
+            do {
+                try native.requireBackground { !self.running }
+                let current = try native.snapshot()
+                guard fileTransferDiagnosticAllowed(name: current.name, isDirect: current.isDirect), current.draft.isEmpty else {
+                    throw AssistantError(message: "请先打开文件传输助手、处理未发送文字，再切回本助手检查；不会发送给好友。")
+                }
+                _ = try await native.checkReturnToFileTransfer(expected: current, stillActive: { !self.running })
+                self.returnCheckStatus = "后台回车发送已核验成功 · 仅文件传输助手 · 未调用 AI"
+            } catch { self.returnCheckStatus = error.localizedDescription }
+        }
+    }
+
     func sendPending(_ id: UUID) async throws {
         guard valid(id), let expected = pending, !draft.isEmpty else { return }
         let reply = draft

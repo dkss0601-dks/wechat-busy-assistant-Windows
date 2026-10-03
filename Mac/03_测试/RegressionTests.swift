@@ -14,6 +14,8 @@ import ApplicationServices
     var firstScreenNames = ["A", "B"]
     var scanCount = 0
     var openedNames: [String] = []
+    var messageDates: [String: Date] = [:]
+    var previewOverrides: [String: String] = [:]
     func snapshot() throws -> Snapshot {
         Snapshot(name: current, rows: rows[current]!, input: AXUIElementCreateApplication(0), draft: drafts[current] ?? "", pid: 0, isDirect: true)
     }
@@ -26,7 +28,9 @@ import ApplicationServices
         try requireBackground(valid)
         scanCount += 1
         return firstScreenNames.map { name in
-            ChatCandidate(name: name, signature: name + ":" + (rows[name]?.last ?? ""), unread: unread[name] ?? 0)
+            ChatCandidate(name: name, signature: name + ":" + (previewOverrides[name] ?? rows[name]?.last ?? ""), unread: unread[name] ?? 0,
+                lastMessageAt: messageDates[name] ?? Date(),
+                preview: previewOverrides[name] ?? rows[name]?.last.flatMap { parseMessage($0, contact: name)?.text })
         }
     }
     func openChat(name: String, valid: () -> Bool) async throws -> Snapshot {
@@ -210,6 +214,7 @@ import ApplicationServices
     chats.unread["B"] = 3
     chats.rows["D"] = ["DSaid:hidden old 1", "DSaid:hidden old 2", "DSaid:hidden newest"]
     chats.unread["D"] = 3
+    chats.messageDates["D"] = Date().addingTimeInterval(-86400)
     var requests: [String] = []
     let model = Assistant(reader: chats, isolatedTest: true, replyGenerator: { incoming, _ in
         requests.append(incoming); return "first-screen reply"
@@ -253,13 +258,15 @@ import ApplicationServices
     precondition(!chats.openedNames.contains("D"))
 
     // An off-screen contact remains undiscovered until it enters the first
-    // screen; its old unread batch is still excluded from the generated reply.
+    // screen; a historical timestamp now excludes even its latest old message.
     chats.firstScreenNames.append("D")
     let appearedCount = chats.scanCount
     await model.pollOnceForTesting()
-    precondition(chats.scanCount == appearedCount + 1 && requests == ["C newest", "hidden newest"])
-    await model.pollOnceForTesting()
-    precondition(chats.sent.count == 2 && chats.sent.last!.0 == "D" && model.running)
+    precondition(chats.scanCount == appearedCount + 1 && requests == ["C newest"])
+    precondition(chats.sent.count == 1 && !chats.openedNames.contains("D"))
+    chats.messageDates["D"] = Date()
+    await deliverLimitTestMessage("D fresh", to: "D", model: model, chats: chats)
+    precondition(requests == ["C newest", "D fresh"] && chats.sent.count == 2 && chats.sent.last!.0 == "D" && model.running)
     chats.unread["D"] = 0
     await deliverLimitTestMessage("停止自动回复", to: "D", model: model, chats: chats)
     let stoppedRequests = requests.count
