@@ -29,6 +29,20 @@ class DatabaseAdapterTests(unittest.TestCase):
         incoming = row(4, 16, "你好")
         self.assertEqual(rows_to_messages([outgoing, incoming], "wxid_self")[-1].sender, "outgoing")
 
+    def test_unmapped_peer_sender_is_incoming_when_self_id_is_known(self):
+        outgoing = row(3, 1, "我发的")
+        outgoing["sender_username"] = "wxid_self"
+        incoming = row(4, 521, "新消息")
+        incoming["sender_username"] = ""
+        messages = rows_to_messages([incoming, outgoing], "wxid_self")
+        self.assertEqual(messages[-1].sender, "incoming")
+        self.assertEqual(messages[0].sender, "outgoing")
+
+    def test_unmapped_sender_without_known_self_id_stays_system(self):
+        incoming = row(4, 521, "无法核对")
+        incoming["sender_username"] = ""
+        self.assertEqual(rows_to_messages([incoming], "wxid_self")[-1].sender, "system")
+
     def test_non_text_clipboard_failed_direct_input_does_not_press_enter(self):
         class FakeEdit:
             sent = False

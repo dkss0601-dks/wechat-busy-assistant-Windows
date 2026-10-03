@@ -46,6 +46,13 @@ def resolve_contact(db, display_name: str) -> str:
 
 def rows_to_messages(rows: list[dict], self_username: str) -> tuple[Message, ...]:
     messages = []
+    # In some WeChat 4.1 chats the peer's sender_username is missing, while
+    # outgoing rows still carry our wxid. Learn our numeric ID from those rows.
+    self_sender_ids = {
+        int(row.get("sender_id") or 0)
+        for row in rows
+        if row.get("sender_username") == self_username and int(row.get("sender_id") or 0) > 0
+    }
     for row in reversed(rows):
         kind = "text" if row.get("type") == "文本" else "other"
         content = row.get("content")
@@ -57,7 +64,11 @@ def rows_to_messages(rows: list[dict], self_username: str) -> tuple[Message, ...
         sender_username = row.get("sender_username") or ""
         if sender_username == self_username:
             sender = "outgoing"
+        elif row.get("type") == "系统消息":
+            sender = "system"
         elif sender_username and sender_id > 0:
+            sender = "incoming"
+        elif sender_id > 0 and self_sender_ids and sender_id not in self_sender_ids:
             sender = "incoming"
         else:
             sender = "system"
