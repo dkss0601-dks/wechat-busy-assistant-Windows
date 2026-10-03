@@ -12,6 +12,7 @@ Windows 版使用 Python、Tkinter、Windows UI Automation 与 DeepSeek API，�
 | `assistant/core.py` | 可见消息衔接、启动基线、回复轮数与发送回执规则 |
 | `assistant/wechat.py` | pywinauto UIA 读取当前私聊及发送前后核对 |
 | `assistant/deepseek.py` | DeepSeek Chat Completions 请求和回复检查 |
+| `check_connection.py` | 用无聊天内容的测试文本检查 API Key 和模型 |
 | `diagnose.py` | 列出微信可访问控件的类型、自动化 ID 和类名；不打印聊天正文 |
 | `config.example.json` | 本机配置样例，不含密钥 |
 | `tests/` | 不连接微信、不调用 API 的规则测试 |
@@ -27,7 +28,7 @@ Windows 版使用 Python、Tkinter、Windows UI Automation 与 DeepSeek API，�
 
 ```powershell
 cd Windows
-py -3.11 -m venv .venv
+py -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
 Copy-Item config.example.json config.json
@@ -44,6 +45,8 @@ $env:DEEPSEEK_API_KEY = "你自己的密钥"
 ```
 
 这只影响当前 PowerShell 会话。不要把真实密钥粘贴到公开终端记录、截图、Issue 或 PR。默认模型为 `deepseek-flash`，请求使用 DeepSeek 官方的 [Chat Completions API](https://api-docs.deepseek.com/api/create-chat-completion/)；可在 `config.json` 的 `model` 字段改为你的账号可用的模型。
+
+可先单独测试 AI 连接：`python check_connection.py`。如果尚未设置环境变量，程序会隐藏输入密钥；只发送一条虚构的测试文字，不读取微信。请求显式关闭思考模式，以便生成简短回复。
 
 ## 找到本机微信控件
 

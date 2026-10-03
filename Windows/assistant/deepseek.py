@@ -38,6 +38,7 @@ def generate(model: str, activity: str, tone: str, incoming: str, first_reply: b
         "model": model,
         "messages": make_messages(activity, tone, incoming, first_reply),
         "stream": False,
+        "thinking": {"type": "disabled"},
         "max_tokens": 220,
     }, ensure_ascii=False).encode("utf-8")
     request = Request(API_URL, data=body, headers={
